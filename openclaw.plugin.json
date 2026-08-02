@@ -1,0 +1,53 @@
+{
+  "id": "faceclaw-bridge",
+  "name": "Faceclaw Bridge",
+  "description": "Bridge between an OpenClaw agent and Faceclaw on Even Realities G2 smart glasses. Hosts the websocket endpoint the phone dials into, routes glasses utterances into agent turns, and exposes the glasses' tools to the agent.",
+  "contracts": {
+    "tools": ["glasses_list_tools", "glasses_call"]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "token": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Shared bearer token the phone must present in its hello frame."
+      },
+      "wsBind": {
+        "type": "string",
+        "default": "127.0.0.1",
+        "description": "Bind address for the bridge websocket server. Use 0.0.0.0 (or a tailscale IP) so the phone can reach it."
+      },
+      "wsPort": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "default": 8790
+      },
+      "sessionKey": {
+        "type": "string",
+        "default": "faceclaw:glasses",
+        "description": "OpenClaw session key used for glasses conversations."
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Agent to run turns against. Defaults to the default agent."
+      },
+      "turnTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "default": 120000
+      },
+      "toolCallTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "default": 20000,
+        "description": "Timeout for a glasses tool call proxied to the phone over MCP."
+      }
+    }
+  }
+}

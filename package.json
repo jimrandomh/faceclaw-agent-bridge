@@ -1,0 +1,31 @@
+{
+  "name": "faceclaw-agent-bridge",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin bridging Faceclaw (Even Realities G2 glasses) to an OpenClaw agent.",
+  "type": "module",
+  "main": "./index.js",
+  "files": [
+    "README.md",
+    "index.js",
+    "lib/",
+    "openclaw.plugin.json"
+  ],
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "faceclaw",
+    "even-g2",
+    "glasses"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}
