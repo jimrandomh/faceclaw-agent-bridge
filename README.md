@@ -3,6 +3,15 @@
 OpenClaw plugin that bridges [Faceclaw](https://github.com/jimrandomh) (an
 Android shell for Even Realities G2 smart glasses) to an OpenClaw agent.
 
+With this installed, "Hey Even" queries spoken on the glasses are answered by
+your own long-running OpenClaw agent instead of a bare LLM API call, the
+agent can use the glasses' tools (show alerts, read notifications, control
+media, type into open apps, ...) while it works, and it can also reach the
+glasses *proactively* — e.g. push an alert to the lenses when a long job
+finishes.
+
+## How it fits together
+
 Phones can't reliably accept inbound connections, so the phone **dials out**
 to this plugin's websocket server (typically over tailscale). One socket
 carries three multiplexed channels:
@@ -22,47 +31,167 @@ The agent sees the glasses through two fixed tools:
   dynamic: it changes as apps open/close/focus).
 - `glasses_call` — invoke one of those tools by name.
 
-Because these are ordinary agent tools, the agent can also call them
-*outside* a glasses-initiated turn (heartbeats, cron, other channels) — e.g.
-pushing an alert to the lenses when a long job finishes. The phone enforces
-its own gating (`proactive` tool flags, rate limits) on such calls.
+Because these are ordinary agent tools, the agent can call them *outside* a
+glasses-initiated turn (heartbeats, cron, other channels). The phone
+enforces its own gating on such calls: only tools marked proactive-safe, an
+on/off setting, and a rate limit.
 
-## Install
+## Setup
+
+The instructions below are written to be followable end-to-end by an
+OpenClaw agent running on the host, including configuring the phone over
+adb. Human setup works the same way; the phone can alternatively be
+configured by hand in the glasses Settings UI (see "Phone setup, manual").
+
+Prerequisites:
+
+- An OpenClaw gateway on this host. Use the same Node version the gateway
+  runs with (OpenClaw enforces a minimum; if `openclaw` prints a Node
+  version error, switch with `nvm use <version>` first).
+- The phone reachable from this host's network, normally by having both on
+  the same tailnet.
+- For the adb path: `adb` installed, the phone plugged in with USB
+  debugging enabled and authorized, and a checkout of the faceclaw repo
+  (for `scripts/pull_config.sh` / `scripts/push_config.sh`). The Faceclaw
+  app must already be installed on the phone.
+
+### 1. Install the plugin (OpenClaw host)
+
+From this repository:
 
 ```bash
-cd faceclaw-agent-bridge
 npm install
 npm pack --pack-destination /tmp
 openclaw plugins install npm-pack:/tmp/faceclaw-agent-bridge-0.1.0.tgz
 ```
 
-Configure in `~/.openclaw/openclaw.json`:
+(Re-installing an updated build: add `--force`.)
 
-```json
-{
-  "plugins": {
-    "entries": {
-      "faceclaw-bridge": {
-        "enabled": true,
-        "config": {
-          "token": "<shared secret, also entered on the phone>",
-          "wsBind": "0.0.0.0",
-          "wsPort": 8790
-        }
-      }
-    }
-  }
-}
+### 2. Configure and start it
+
+Generate a shared token and configure the plugin. `wsBind` must be an
+address the phone can reach — `0.0.0.0` is simplest when the host is only
+reachable over a tailnet; otherwise bind the tailscale IP specifically.
+
+```bash
+TOKEN=$(openssl rand -hex 24)
+openclaw config set plugins.entries.faceclaw-bridge.enabled true
+openclaw config set plugins.entries.faceclaw-bridge.config.token "$TOKEN"
+openclaw config set plugins.entries.faceclaw-bridge.config.wsBind 0.0.0.0
+openclaw config set plugins.entries.faceclaw-bridge.config.wsPort 8790
+openclaw gateway restart
 ```
 
-Then restart the gateway. Security stance: bind to a tailscale-reachable
-address and rely on the tailnet plus the bearer token; TLS is not used
-(same stance as g2mirror).
+Verify it came up:
 
-On the phone, set Settings → Assistant → backend to `external` and fill in
-the bridge host/port/token.
+```bash
+openclaw plugins inspect faceclaw-bridge --runtime --json | grep -E '"status"|glasses_'
+# expect: "status": "loaded", plus the two glasses_* tool names
+lsof -iTCP:8790 -sTCP:LISTEN   # the gateway process should be listening
+```
 
-## Config
+The gateway log also prints `[faceclaw-bridge] listening on ws://...` on
+startup, and `[faceclaw-bridge] phone connected: <name>` when the phone
+dials in.
+
+### 3. Make sure the agent has model auth
+
+Bridge turns run as normal agent turns, so the agent must be able to reach
+its model. `openclaw models status` should show auth for your configured
+provider; if it lists the provider under "Missing auth", fix that first
+(e.g. `openclaw models auth login --provider anthropic`, or set an API
+key).
+
+### 4. Phone setup, automated over adb
+
+Faceclaw stores its settings in Android SharedPreferences; the faceclaw
+repo has scripts to pull/edit/push them through adb. The relevant keys:
+
+| Key | Type | Value |
+|---|---|---|
+| `assistant.backend` | string | `external` |
+| `assistant.bridgeHost` | string | this host's address as seen from the phone, e.g. `tailscale ip -4` output or the MagicDNS hostname |
+| `assistant.bridgePort` | string | `8790` (must match `wsPort`; note: string, not int) |
+| `assistant.bridgeToken` | string | the `$TOKEN` generated above |
+| `assistant.allowProactive` | boolean | `true` to let the agent reach the glasses outside conversations (default true; omit unless turning it off) |
+
+From the faceclaw repo checkout, with the phone attached:
+
+```bash
+adb devices                 # confirm the device is present and authorized
+./scripts/pull_config.sh    # writes ./faceclaw_settings.xml
+```
+
+The pulled file is a flat `<map>` of nodes like:
+
+```xml
+<string name="assistant.bridgeHost">100.68.94.67</string>
+<boolean name="assistant.allowProactive" value="true" />
+```
+
+Settings that have never been set are absent; the pull script appends
+commented-out placeholder nodes for every known key, so editing is usually
+just uncommenting and filling in. Add or update the four keys above (host,
+port, token, and `assistant.backend` set to `external`), then:
+
+```bash
+./scripts/push_config.sh
+# push_config.sh force-stops the app so it can't overwrite the pushed file;
+# relaunch it afterwards:
+adb shell monkey -p com.faceclaw.app -c android.intent.category.LAUNCHER 1
+```
+
+**The pulled file contains the user's API keys and tokens in plain text.
+Treat it as a secret: don't commit it, log it, or paste it anywhere.**
+Faceclaw's `.gitignore` already covers the default filename inside that
+repo.
+
+### 5. Phone setup, manual (alternative)
+
+On the glasses: Settings → Assistant → set *Assistant backend* to "My own
+agent (bridge)", then fill in *Bridge host*, *Bridge port*, and *Bridge
+token*. The bridge connection starts as soon as host and token are set
+(and re-dials automatically with backoff whenever it drops).
+
+### 6. Verify end to end
+
+1. **Connection**: after the app relaunches, the gateway log shows
+   `[faceclaw-bridge] phone connected` (give it a few seconds; the phone
+   re-dials with backoff up to 60s).
+2. **Tools direction** (no glasses interaction needed): ask the agent — on
+   any channel — to "list the glasses tools", or invoke directly:
+
+   ```bash
+   curl -s -X POST http://127.0.0.1:<gateway-port>/tools/invoke \
+     -H "Authorization: Bearer <gateway token>" \
+     -H "Content-Type: application/json" \
+     -d '{"tool":"glasses_call","args":{"tool":"glasses.show_alert","args":{"text":"Bridge is up"}}}'
+   ```
+
+   The alert should appear on the lenses (screen need not be on for the
+   call to succeed as long as the app is running).
+3. **Chat direction**: say "Hey Even", ask something. The reply should
+   stream onto the lenses, and the turn appears in the `faceclaw:glasses`
+   OpenClaw session (`openclaw sessions list`).
+
+### Troubleshooting
+
+- *Phone never connects*: check host/port/token on the phone; check the
+  phone can reach the host (`tailscale ping` from another device); check
+  `wsBind` isn't `127.0.0.1`; watch the gateway log for
+  `[faceclaw-bridge] auth failure` (token mismatch).
+- *`glasses_*` tools error with "Glasses are not connected"*: the phone
+  isn't currently dialed in (app killed, network change mid-backoff, or
+  bridge settings incomplete on the phone).
+- *Turns fail with a provider/auth error*: step 3.
+- *Bridge refuses to start ("no token configured")*: step 2's config
+  didn't land under `plugins.entries.faceclaw-bridge.config`.
+- A simulated phone for testing without hardware is in
+  `test/fake-phone.js`:
+  `node test/fake-phone.js ws://localhost:8790 $TOKEN "what time is it?"`.
+  It serves two fake glasses tools and prints streamed reply frames.
+
+## Config reference
 
 | Key | Default | Notes |
 |---|---|---|
@@ -73,6 +202,9 @@ the bridge host/port/token.
 | `agentId` | default agent | |
 | `turnTimeoutMs` | `120000` | |
 | `toolCallTimeoutMs` | `20000` | Phone-side MCP round-trip timeout |
+
+Security stance: bind to a tailscale-reachable address and rely on the
+tailnet plus the bearer token; TLS is not used (same stance as g2mirror).
 
 ## Wire protocol (v1)
 
@@ -101,9 +233,4 @@ headsetBattery}` for situational grounding.
 ## Development
 
 The design rationale lives in the Faceclaw repo at
-`notes/voice-assistant-design.md` ("External mode"). A simulated-phone test
-client is in `test/fake-phone.js`:
-
-```bash
-node test/fake-phone.js ws://localhost:8790 <token> "what time is it?"
-```
+`notes/voice-assistant-design.md` ("External mode").
