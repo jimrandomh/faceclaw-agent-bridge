@@ -61,11 +61,18 @@ From this repository:
 
 ```bash
 npm install
-npm pack --pack-destination /tmp
-openclaw plugins install npm-pack:/tmp/faceclaw-agent-bridge-0.1.0.tgz
+openclaw plugins install --force "$PWD"
 ```
 
-(Re-installing an updated build: add `--force`.)
+OpenClaw copies the directory as-is, including `node_modules`, so run
+`npm install` first. `--force` overwrites any previous install, and on
+OpenClaw 2026.8.1+ it also confirms the non-ClawHub source; without it the
+install prompts, or is cancelled outright when there's no TTY. To install an
+updated build, rerun both commands.
+
+OpenClaw will warn that the manifest id `faceclaw-bridge` differs from the
+npm package name `faceclaw-agent-bridge` and that it is using the manifest id
+as the config key. That's expected; `faceclaw-bridge` is the key used below.
 
 ### 2. Configure and start it
 
@@ -176,6 +183,10 @@ token*. The bridge connection starts as soon as host and token are set
 
 ### Troubleshooting
 
+- *Install fails with "npm pack metadata read produced incomplete package
+  metadata"*: you used the `npm pack` + `npm-pack:` install route with npm
+  12 on OpenClaw 2026.7.x, which can't parse npm 12's `npm pack --json`
+  output (fixed in 2026.8.1). Use the directory install from step 1.
 - *Phone never connects*: check host/port/token on the phone; check the
   phone can reach the host (`tailscale ping` from another device); check
   `wsBind` isn't `127.0.0.1`; watch the gateway log for
